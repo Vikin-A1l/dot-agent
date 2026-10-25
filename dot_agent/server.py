@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -113,8 +114,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.pipeline.reset_meter()  # 逐请求计量，避免跨请求累积
                 result = asyncio.run(self.pipeline.run(query, **options))
-            except Exception as e:  # 演示服务不崩，错误回传前端
-                self._send_json({"error": "pipeline_failed", "success": False}, status=500)
+            except Exception as e:  # 演示服务不崩，错误回传前端并留堆栈
+                traceback.print_exc()
+                self._send_json(
+                    {"error": "pipeline_failed", "detail": type(e).__name__,
+                     "success": False}, status=500,
+                )
                 return
         data = _serialize(result)
         with _HISTORY_LOCK:

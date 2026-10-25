@@ -15,6 +15,7 @@ L3 运行时重分类钩子：快速通道一致性不过 → 升级 REASONING �
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 from .cache.semantic import SemanticCache
@@ -70,6 +71,28 @@ class AgentPipeline:
     # ------------------------------------------------------------------ #
     async def run(self, query: str, *, sources: list[dict] | None = None,
                   selector: str = "bm25") -> RunResult:
+        """对外请求入口：模型侧异常收敛成失败结果，不让 HTTP 层返回裸 500。
+
+        校验类 ValueError 仍向上抛出（HTTP 层按 400 处理）；模型调用失败
+        （截断/空答/连接/HTTP 错误）返回 success=False 且带错误码的结果，
+        调用账本里已产生的真实用量照常保留。
+        """
+        t0 = time.perf_counter()
+        try:
+            return await self._run(query, sources=sources, selector=selector)
+        except RuntimeError as error:  # GenerationError / model_http_* / model_connection_error
+            code = str(error) or type(error).__name__
+            print(f"[pipeline] 请求失败: {code}", file=sys.stderr)
+            trace = [
+                f"模型调用失败: {code}",
+                "本地侧失败会先尝试升级云端；仍失败则如实返回失败，不伪造答案",
+            ]
+            return self._finalize(query if isinstance(query, str) else "", "",
+                                  Label.QA, "failed", trace, t0,
+                                  success=False, error=code)
+
+    async def _run(self, query: str, *, sources: list[dict] | None = None,
+                   selector: str = "bm25") -> RunResult:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("invalid_query")
         if selector not in ("bm25", "local", "full", "rule"):
@@ -184,6 +207,9 @@ class AgentPipeline:
     async def _fast_path(self, query: str, verify_kind: str, trace: list[str]) -> tuple[str, bool]:
         """本地直答；k=3 一致性（复用 SignalCollector 的 greedy 结果当答案）。"""
         sig, greedy = await self.signals.collect(query)
+        if greedy is None:  # 本地试答被截断/空答/连接失败 → 交给上层升级
+            trace.append("fast_path 本地试答不可用（截断/空答/失败）→ 升级完整流水线")
+            return "", False
         trace.append(
             f"fast_path 信号: α-quantile={sig.alpha_quantile} "
             f"consistency={sig.consistency} → 本地直答"
@@ -239,6 +265,16 @@ class AgentPipeline:
             decision = self.router.assign(label, sig)
             st.assigned = decision.tier
             trace.append(f"{st.id} 路由: {decision.reason}")
+
+            if self.use_signals and greedy is None:
+                # 本地采样拿不到有效样本：直接交给云端，不再用同一模型重试同样的失败
+                st.assigned = ModelTier.MC
+                trace.append(f"{st.id} 本地采样不可用 → 云端执行")
+                return (
+                    await self.cloud.generate(
+                        prompt, max_tokens=512, temperature=0.0, caller=Caller.EXECUTE
+                    )
+                ).text
 
             if decision.tier is ModelTier.MD:
                 if greedy is None:  # 信号关闭时本地直接生成
