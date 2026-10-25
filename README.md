@@ -7,9 +7,11 @@
 ## 获取代码
 
 ```powershell
-git clone --branch release/unified-team-20261025 --single-branch https://github.com/Vikin-A1l/dot-agent.git
+git clone --branch release/unified-team-20261025 --single-branch https://github.com/muti-agent-sysu-project/dot-agent.git
 cd dot-agent
 ```
+
+仓库由 `muti-agent-sysu-project` 组织共同维护；Vikin-A1l、Hachiwa0 和 Ultraman-Mebius-ezio 均拥有本仓库的 Admin 权限，可直接推送修复分支、处理 Issues 和管理仓库。Issues 已开启：[报告或跟踪问题](https://github.com/muti-agent-sysu-project/dot-agent/issues)。
 
 代码、测试、合成示例和文档随 Git 分发，无需另发代码压缩包。真实模型文件、llama.cpp 运行时、API Key、SSH 私钥和个人运行数据库不在仓库中。
 

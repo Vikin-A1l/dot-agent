@@ -1,13 +1,13 @@
 # 组员使用与协作指南
 
-本指南对应 `Vikin-A1l/dot-agent` 的 `release/unified-team-20261025` 分支。获取这个分支即可获得当前统一代码，无需向组员分发工作区压缩包。
+本指南对应 `muti-agent-sysu-project/dot-agent` 的 `release/unified-team-20261025` 分支。获取这个分支即可获得当前统一代码，无需向组员分发工作区压缩包。
 
 ## 1. 首次获取
 
 在自己电脑的 PowerShell、终端或 Git Bash 中执行：
 
 ```powershell
-git clone --branch release/unified-team-20261025 --single-branch https://github.com/Vikin-A1l/dot-agent.git
+git clone --branch release/unified-team-20261025 --single-branch https://github.com/muti-agent-sysu-project/dot-agent.git
 cd dot-agent
 git branch --show-current
 ```
@@ -21,7 +21,15 @@ git fetch origin
 git switch --track origin/release/unified-team-20261025
 ```
 
-这适用于组员自己 clone 后远端名为 `origin` 的目录。项目负责人原电脑上，团队仓库叫 `origin`、个人 fork 叫 `fork`，不要混用远端名称。
+这适用于组员自己 clone 后远端名为 `origin` 的目录。项目负责人原电脑保留 `origin` 指向原上游 `Hachiwa0/dot-agent`，`fork` 已指向当前组织仓库；组员克隆后的 `origin` 则指向组织仓库，不要混用远端名称。
+
+已有个人仓库克隆可直接更新远端，无需重新下载：
+
+```powershell
+git remote set-url origin https://github.com/muti-agent-sysu-project/dot-agent.git
+```
+
+当前 Vikin-A1l、Hachiwa0、Ultraman-Mebius-ezio 三人均为**本仓库 Admin**，可推送分支、修复问题、处理 Issues 及管理仓库设置。这是仓库级权限，不改变其他仓库权限或组织角色。Issues 入口为 https://github.com/muti-agent-sysu-project/dot-agent/issues 。
 
 ## 2. 无模型体验
 
