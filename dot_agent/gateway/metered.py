@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 import time
 
@@ -19,6 +20,10 @@ from .base import ModelClient
 from .meter import CallMeter
 from .openai_compat import GenerationError
 from . import store
+
+class LedgerWriteError(RuntimeError):
+    """A completed attempt could not be durably recorded; do not call another model."""
+
 
 # 实测瞬态错误特征（来自团队 RTX 5060/sm_120 与公网环境实测）
 _TRANSIENT_MARKERS = (
@@ -64,6 +69,8 @@ class MeteredClient(ModelClient):
             return await self._with_retries(
                 prompt, max_tokens, temperature, caller, requested_tier
             )
+        except LedgerWriteError:
+            raise
         except RuntimeError as e:
             # 云端不可用（无 key/连接失败）→ 降级本地执行，如实记双档位
             if self.fallback is None or requested_tier is not ModelTier.MC:
@@ -119,8 +126,11 @@ class MeteredClient(ModelClient):
             prompt_tokens=pt, completion_tokens=ct, latency_s=latency,
             usage_missing=usage_missing, note=error or "",
         )
-        store.record_call(
-            caller=caller.value, tier=tier.value, requested_tier=requested_tier.value,
-            model=self.name, prompt_tokens=pt, completion_tokens=ct, latency_s=latency,
-            run_id=self.run_id, usage_missing=usage_missing, error=error,
-        )
+        try:
+            store.record_call(
+                caller=caller.value, tier=tier.value, requested_tier=requested_tier.value,
+                model=self.name, prompt_tokens=pt, completion_tokens=ct, latency_s=latency,
+                run_id=self.run_id, usage_missing=usage_missing, error=error,
+            )
+        except (OSError, sqlite3.Error):
+            raise LedgerWriteError("call_ledger_write_failed") from None

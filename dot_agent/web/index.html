@@ -18,11 +18,25 @@
     <button class="run" id="run">运行</button>
   </div>
 
+  <details class="card source-input">
+    <summary>附带资料（可选）</summary>
+    <label for="sources">粘贴原文，每段资料之间留一个空行。系统自动编号，答案会显示引用。</label>
+    <textarea id="sources" rows="5" placeholder="第一段原文
+
+第二段原文"></textarea>
+    <label for="selector">资料选择方式</label>
+    <select id="selector">
+      <option value="bm25">关键词检索（BM25，默认）</option>
+      <option value="local">本地小模型选择</option>
+    </select>
+  </details>
+
   <div class="examples" id="examples"></div>
 
   <div class="card">
     <h2>结果 <span class="path-badge" id="path"></span></h2>
     <div class="answer" id="answer">—</div>
+    <div class="muted" id="source-trace" aria-live="polite"></div>
   </div>
 
   <div class="card" style="grid-column: 1 / -1">

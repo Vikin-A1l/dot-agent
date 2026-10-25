@@ -26,6 +26,7 @@ from .gateway.meter import CallMeter
 from .gateway.metered import MeteredClient
 from .orchestrator.decomposer import TaskDecomposer
 from .orchestrator.escalator import EscalationGuard
+from .orchestrator.evidence import EvidenceWorkflow, validate_sources
 from .orchestrator.router import POLICY, Router
 from .orchestrator.scheduler import TaskScheduler
 from .orchestrator.signals import SignalCollector
@@ -67,8 +68,24 @@ class AgentPipeline:
         self.cache = SemanticCache()
 
     # ------------------------------------------------------------------ #
-    async def run(self, query: str) -> RunResult:
+    async def run(self, query: str, *, sources: list[dict] | None = None,
+                  selector: str = "bm25") -> RunResult:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("invalid_query")
+        if selector not in ("bm25", "local", "full", "rule"):
+            raise ValueError("invalid_selector")
         t0 = time.perf_counter()
+        if sources is not None:
+            sources = validate_sources(sources)
+            cloud = MeteredClient(self.cloud.inner, self.meter, run_id=self.run_id,
+                                  retries=self.cloud.retries)
+            outcome = await EvidenceWorkflow(self.local, cloud, self.meter).run(query, sources, selector)
+            return self._finalize(
+                query, outcome.answer, Label.QA, outcome.path, outcome.trace, t0,
+                success=outcome.error is None, error=outcome.error,
+                provided_sources=outcome.provided_sources, citations=outcome.citations)
+        if selector != "bm25":
+            raise ValueError("selector_requires_sources")
         trace: list[str] = []
         meter = self.meter
 
@@ -255,9 +272,18 @@ class AgentPipeline:
         return executor
 
     # ------------------------------------------------------------------ #
-    def _finalize(self, query, answer, label, path, trace, t0, subtasks=None) -> RunResult:
+    def _finalize(self, query, answer, label, path, trace, t0, subtasks=None, *,
+                  success=True, error=None, provided_sources=None, citations=None) -> RunResult:
         total = time.perf_counter() - t0
         m = self.meter.summarize(total)
+        from .gateway.stub import StubModelClient
+        used_tiers = {log.tier for log in self.meter.logs}
+        m["simulated"] = ((ModelTier.MD in used_tiers and isinstance(self.local.inner, StubModelClient))
+                          or (ModelTier.MC in used_tiers and isinstance(self.cloud.inner, StubModelClient)))
+        if path == "cache_hit" or not used_tiers:
+            m["simulated"] = (isinstance(self.local.inner, StubModelClient)
+                              or isinstance(self.cloud.inner, StubModelClient))
+        m["ledger_complete"] = error != "call_ledger_write_failed"
         # 请求级落库（tasks 表）：C_time 是请求级量纲，分位数按此表算才不失真
         stages = self.meter.stage_latency
         plan_ms = (stages.get("classify", 0.0) + stages.get("decompose", 0.0)) * 1000
@@ -273,12 +299,15 @@ class AgentPipeline:
                 n_cloud=sum(1 for s in subtasks or [] if s.get("assigned") == "MC"),
                 total_ms=total * 1000, plan_ms=plan_ms, exec_ms=exec_ms,
                 cloud_tokens=m["C_API_total"],
-                unknown_usage_calls=m["unknown_usage_calls"],
+                unknown_usage_calls=m["unknown_usage_calls"], error=error,
             )
         except Exception as e:  # 落库失败不阻断主流程，但要可见
             import sys
 
-            print(f"[store] ⚠ tasks 落库失败: {e}", file=sys.stderr)
+            m["ledger_complete"] = False
+            print(f"[store] tasks 落库失败: {type(e).__name__}", file=sys.stderr)
+            if path.startswith("evidence_"):
+                success, error = False, "task_ledger_write_failed"
         return RunResult(
             query=query,
             answer=answer,
@@ -286,5 +315,6 @@ class AgentPipeline:
             path=path,
             trace=trace,
             metrics=m,
-            subtasks=subtasks or [],
+            subtasks=subtasks or [], success=success, error=error,
+            provided_sources=provided_sources or [], citations=citations or [],
         )

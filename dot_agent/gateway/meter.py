@@ -75,7 +75,8 @@ class CallMeter:
         for l in self.logs:
             entry = by_caller[l.caller.value]
             entry["calls"] += 1
-            entry["tokens"] += l.prompt_tokens + l.completion_tokens
+            if not l.usage_missing:
+                entry["tokens"] += l.prompt_tokens + l.completion_tokens
         unknown = sum(1 for l in self.logs if l.usage_missing)
         fallbacks = sum(
             1 for l in self.logs

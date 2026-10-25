@@ -17,10 +17,21 @@ async function boot() {
     const chip = document.createElement("button");
     chip.className = "chip";
     chip.textContent = q.length > 22 ? q.slice(0, 22) + "…" : q;
-    chip.onclick = () => { $("query").value = q; run(); };
+    chip.onclick = () => { $("sources").value = ""; $("query").value = q; run(); };
     $("examples").appendChild(chip);
   });
 
+  const evidenceExample = document.createElement("button");
+  evidenceExample.className = "chip";
+  evidenceExample.textContent = "资料问答示例";
+  evidenceExample.onclick = () => {
+    $("query").value = "报名截止时间是什么？";
+    $("sources").value = "活动地点在教学楼。\n\n报名截止时间是周五17点。";
+    $("selector").value = "bm25";
+    document.querySelector(".source-input").open = true;
+    run();
+  };
+  $("examples").appendChild(evidenceExample);
   const runtime = await (await fetch("/api/runtime")).json();
   const stub = runtime.local === "stub" || runtime.cloud === "stub";
   $("runtime").textContent =
@@ -32,20 +43,32 @@ async function boot() {
 async function run() {
   const query = $("query").value.trim();
   if (!query) return;
+  const payload = { query };
+  const sourceText = $("sources").value;
+  if (sourceText.trim()) {
+    payload.sources = sourceText.split(/\n\s*\n/).filter(text => text.trim())
+      .map((text, i) => ({ source_id: "source-" + (i + 1), text }));
+    payload.selector = $("selector").value;
+  }
   $("run").disabled = true;
   $("answer").textContent = "推理中…";
   try {
     const resp = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json();
-    if (data.error) { $("answer").innerHTML = `<span class="error">${data.error}</span>`; return; }
-    render(data);
+    if (data.metrics) render(data);
+    if (data.error) {
+      $("answer").textContent = "运行未完成：" + data.error;
+      $("answer").classList.add("error");
+    } else {
+      $("answer").classList.remove("error");
+    }
     loadHistory();
   } catch (e) {
-    $("answer").innerHTML = `<span class="error">请求失败: ${e}</span>`;
+    $("answer").textContent = "请求失败，请检查本地服务是否运行。";
   } finally {
     $("run").disabled = false;
   }
@@ -57,6 +80,8 @@ function render(d) {
   $("path").textContent = {
     cache_hit: "缓存命中", fast_path: "快速通道·本地直答",
     pipeline: "分解流水线", direct_cloud: "整题收敛云端",
+    evidence_bm25: "检索证据 → 云端回答", evidence_local: "本地选证据 → 云端回答",
+    evidence_full_fallback: "全文云端回退", evidence_failed: "资料问答未完成",
   }[d.path] || d.path;
 
   const m = d.metrics || {};
@@ -64,8 +89,14 @@ function render(d) {
   const stages = m.stage_latency_s || {};
   $("t-ctime-sub").textContent = Object.entries(stages)
     .map(([k, v]) => `${k} ${v.toFixed(3)}`).join(" · ") || "无阶段耗时";
-  $("t-capi").textContent = `${m.C_API_total ?? "–"}`;
+  $("t-capi").textContent = (m.simulated ? "模拟 " : "") + (m.C_API_total ?? "–");
   $("t-capi-sub").textContent = `in ${m.C_API_in ?? 0} / out ${m.C_API_out ?? 0} · 云端调用 ${m.cloud_calls ?? 0} 次`;
+  if (m.unknown_usage_calls) $("t-capi-sub").textContent += " · 已知小计，另有 " + m.unknown_usage_calls + " 次用量未知";
+  if (m.simulated) $("t-capi-sub").textContent += " · 模拟用量，不代表真实模型表现";
+  if (m.ledger_complete === false) $("t-capi-sub").textContent += " · 账本不完整";
+  $("source-trace").textContent = (d.provided_sources || []).length
+    ? "提供给云端的来源：" + d.provided_sources.join("、") + "；答案引用：" + ((d.citations || []).join("、") || "无")
+    : "";
   $("t-local").textContent = m.local_calls ?? "–";
   $("t-local-sub").textContent = `本地推理 ${m.local_latency_s ?? 0}s`;
   $("t-label").textContent = d.label;
@@ -79,7 +110,7 @@ function render(d) {
 function renderDag(subtasks) {
   const box = $("dag");
   if (!subtasks.length) {
-    box.innerHTML = '<div class="dag-empty">本请求未走分解流水线（快速通道 / 缓存命中 / 整题升级），无子任务图。</div>';
+    box.innerHTML = '<div class="dag-empty">本请求未拆分任务。资料问答的证据选择与引用可在结果和决策时间线中查看。</div>';
     return;
   }
   const levels = {};

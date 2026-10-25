@@ -118,3 +118,11 @@ button.run:disabled { opacity: 0.5; cursor: wait; }
 .error { color: #d03b3b; }
 
 .muted { color: var(--text-muted); font-size: 12px; }
+
+/* Optional source input; reuse the existing card and form styling. */
+.source-input { grid-column: 1 / -1; }
+.source-input summary { cursor: pointer; font-weight: 600; }
+.source-input label { display: block; margin: 10px 0 5px; color: var(--text-secondary); }
+.source-input textarea { width: 100%; resize: vertical; padding: 10px; font: inherit; color: var(--text-primary); background: var(--surface-1); border: 1px solid var(--grid); border-radius: 8px; }
+.source-input select { font: inherit; padding: 5px; }
+#source-trace { margin-top: 10px; overflow-wrap: anywhere; }
