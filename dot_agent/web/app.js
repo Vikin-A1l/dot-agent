@@ -2,6 +2,20 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+/* 错误码 → 可读提示：后端只回码，人话放在前端，避免改后端契约 */
+const ERROR_HINTS = {
+  model_incomplete_answer: "本地模型回答被长度上限截断（model_incomplete_answer），已尝试升级云端，可重试或换个问法",
+  model_empty_answer: "模型返回空回答（model_empty_answer），可重试",
+  model_invalid_response: "模型返回格式异常（model_invalid_response）",
+  model_connection_error: "模型接口连接失败（model_connection_error），检查隧道或后端服务",
+  model_http_401: "云端鉴权失败（401），检查 API Key",
+  model_http_402: "云端余额不足（402）",
+  model_http_429: "云端限流（429），请稍后重试",
+  model_http_500: "云端服务异常（500）",
+  model_http_503: "云端服务不可用（503）",
+  evidence_incomplete: "资料问答未完成（引用或格式契约未通过）",
+  task_ledger_write_failed: "结果已生成，但指标落库失败（task_ledger_write_failed）",
+};
 const EXAMPLES = [
   "一个班30人, 每5人一组共多少组? 教室长8米宽6米面积是多少?",
   "下列哪项不是哺乳动物？\nA. 鲸鱼\nB. 鲨鱼\nC. 蝙蝠\nD. 海豚",
@@ -61,7 +75,7 @@ async function run() {
     const data = await resp.json();
     if (data.metrics) render(data);
     if (data.error) {
-      $("answer").textContent = "运行未完成：" + data.error;
+      $("answer").textContent = "运行未完成：" + (ERROR_HINTS[data.error] || data.error);
       $("answer").classList.add("error");
     } else {
       $("answer").classList.remove("error");
