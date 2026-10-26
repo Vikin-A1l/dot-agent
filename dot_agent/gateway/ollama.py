@@ -29,6 +29,7 @@ class OllamaClient(ModelClient):
         model: str | None = None,
         timeout_s: float = 120.0,
         want_logprobs: bool = True,
+        think: bool = False,
     ) -> None:
         import os
 
@@ -36,6 +37,9 @@ class OllamaClient(ModelClient):
         self.model = model or os.environ.get("OLLAMA_MODEL", "qwen3:4b")
         self.timeout_s = timeout_s
         self.want_logprobs = want_logprobs
+        # 思考模型（Qwen3 等）默认把 max_tokens 全耗在 thinking 上，正文为空。
+        # 仓库部署纪律要求本地关闭思考；Ollama 需显式传 think=false。
+        self.think = think
         self.name = f"ollama:{self.model}"
         # 本地回环绕过系统代理（WSL/企业代理会把 localhost 请求也转发的坑）
         from urllib.request import ProxyHandler, build_opener
@@ -56,6 +60,7 @@ class OllamaClient(ModelClient):
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "think": self.think,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
         if self.want_logprobs:
@@ -90,9 +95,10 @@ class OllamaClient(ModelClient):
             with self.opener.open(req, timeout=self.timeout_s) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            # 旧版 Ollama 不识别 logprobs 参数 → 去掉重试一次
+            # 旧版 Ollama 可能不识别 logprobs / think 参数 → 去掉后重试一次
             if allow_logprobs_retry and e.code in (400, 404):
                 payload.pop("logprobs", None)
+                payload.pop("think", None)
                 return self._post(payload, allow_logprobs_retry=False)
             raise RuntimeError(f"Ollama 请求失败: {e.code} {e.read()[:200]!r}") from e
         except urllib.error.URLError as e:
