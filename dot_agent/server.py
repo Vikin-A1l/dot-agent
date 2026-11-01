@@ -17,11 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .gateway.factory import make_clients, warmup_real
 from .pipeline import AgentPipeline
+from .orchestrator.evidence import validate_sources
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 HISTORY: list[dict] = []
@@ -38,6 +40,10 @@ def _serialize(result) -> dict:
         "trace": result.trace,
         "metrics": result.metrics,
         "subtasks": result.subtasks,
+        "success": result.success,
+        "error": result.error,
+        "provided_sources": result.provided_sources,
+        "citations": result.citations,
     }
 
 
@@ -50,19 +56,46 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[server] {fmt % args}")
 
     # ---------------- GET ----------------
+    _STATIC_TYPES = {
+        ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".woff2": "font/woff2",
+        ".woff": "font/woff",
+        ".ttf": "font/ttf",
+        ".map": "application/json; charset=utf-8",
+    }
+
+    def _serve_asset(self, rel: str):
+        """只放行 web 目录内的静态资源，挡住目录穿越。"""
+        target = (WEB_DIR / rel).resolve()
+        try:
+            target.relative_to(WEB_DIR.resolve())
+        except ValueError:
+            self.send_error(404)
+            return
+        if not target.is_file():
+            self.send_error(404)
+            return
+        ctype = self._STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        self._send_file(target, ctype)
+
     def do_GET(self) -> None:
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
             self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
-        elif self.path == "/app.js":
+        elif self.path.startswith("/vendor/"):
+            # 内置 KaTeX / marked，离线也能渲染公式与 Markdown
+            self._serve_asset(self.path.split("?", 1)[0].lstrip("/"))
+        elif path == "/app.js":
             self._send_file(WEB_DIR / "app.js", "text/javascript; charset=utf-8")
-        elif self.path == "/style.css":
+        elif path == "/style.css":
             self._send_file(WEB_DIR / "style.css", "text/css; charset=utf-8")
-        elif self.path == "/api/runtime":
+        elif path == "/api/runtime":
             self._send_json(self.runtime)
-        elif self.path == "/api/history":
+        elif path == "/api/history":
             with _HISTORY_LOCK:
                 self._send_json({"history": HISTORY})
-        elif self.path == "/favicon.ico":
+        elif path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
         else:
@@ -73,29 +106,53 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/run":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
         try:
-            body = json.loads(self.rfile.read(length).decode())
-            query = body["query"].strip()
-        except (json.JSONDecodeError, KeyError, AttributeError):
-            self._send_json({"error": "请求体需为 {query: string}"}, status=400)
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send_json({"error": "invalid_content_length"}, status=400)
             return
-        if not query:
-            self._send_json({"error": "query 不能为空"}, status=400)
+        if not 0 < length <= 1024 * 1024:
+            self._send_json({"error": "request_body_size_invalid"}, status=413)
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            self._send_json({"error": "invalid_json"}, status=400)
+            return
+        try:
+            if not isinstance(body, dict) or not isinstance(body.get("query"), str):
+                raise ValueError("invalid_query")
+            query = body["query"].strip()
+            if not query:
+                raise ValueError("invalid_query")
+            selector = body.get("selector", "bm25")
+            if selector not in ("bm25", "local"):
+                raise ValueError("invalid_selector")
+            options = {}
+            if "sources" in body:
+                options = {"sources": validate_sources(body["sources"]), "selector": selector}
+            elif selector != "bm25":
+                raise ValueError("selector_requires_sources")
+        except ValueError as error:
+            self._send_json({"error": str(error)}, status=400)
             return
 
         with self.run_lock:  # asyncio.run 每请求独立事件循环
             try:
                 self.pipeline.reset_meter()  # 逐请求计量，避免跨请求累积
-                result = asyncio.run(self.pipeline.run(query))
-            except Exception as e:  # 演示服务不崩，错误回传前端
-                self._send_json({"error": f"流水线执行失败: {e}"}, status=500)
+                result = asyncio.run(self.pipeline.run(query, **options))
+            except Exception as e:  # 演示服务不崩，错误回传前端并留堆栈
+                traceback.print_exc()
+                self._send_json(
+                    {"error": "pipeline_failed", "detail": type(e).__name__,
+                     "success": False}, status=500,
+                )
                 return
         data = _serialize(result)
         with _HISTORY_LOCK:
             HISTORY.insert(0, data)
             del HISTORY[_MAX_HISTORY:]
-        self._send_json(data)
+        self._send_json(data, status=200 if result.success else 502)
 
     # ---------------- helpers ----------------
     def _send_json(self, obj: dict, status: int = 200) -> None:
@@ -118,9 +175,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def serve(host: str = "0.0.0.0", port: int = 8765) -> None:
-    local, cloud, info = make_clients()
-    asyncio.run(warmup_real(info, local, cloud))  # 真实模型预热，防冷启动污染首请求
+def serve(host: str = "0.0.0.0", port: int = 8765, *, demo: bool = False) -> None:
+    if demo:
+        from .gateway.stub import StubModelClient
+        from .gateway.demo_behavior import local_demo_behavior, cloud_demo_behavior
+        from .types import ModelTier
+        local = StubModelClient(ModelTier.MD, name="local-demo", behavior=local_demo_behavior)
+        cloud = StubModelClient(ModelTier.MC, name="cloud-demo", behavior=cloud_demo_behavior)
+        info = {"local": "stub", "cloud": "stub", "notes": ["显式离线演示，不读取真实模型配置"]}
+    else:
+        local, cloud, info = make_clients()
+        asyncio.run(warmup_real(info, local, cloud))  # 真实模型预热，防冷启动污染首请求
     Handler.pipeline = AgentPipeline(local, cloud, run_id="server")
     Handler.runtime = info
     for note in info.get("notes", []):
@@ -137,5 +202,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--demo", action="store_true", help="显式使用演示模型，不读取真实后端配置")
     args = parser.parse_args()
-    serve(args.host, args.port)
+    serve(args.host, args.port, demo=args.demo)

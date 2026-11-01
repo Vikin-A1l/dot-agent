@@ -11,7 +11,22 @@
 """
 from __future__ import annotations
 
+import os
 import re
+
+
+def _budget(key: str, default: int) -> int:
+    """预算可由环境变量覆盖，便于按机器实测再调。"""
+    try:
+        return max(1, int(os.environ.get(key, default)))
+    except ValueError:
+        return default
+
+
+# greedy 试答的结果会被直接复用为“本地答案”，所以它必须按答案的长度给；
+# 另外两次采样只用于比对一致率，短一些即可。
+BUDGET_GREEDY = _budget("DOT_BUDGET_SIGNAL_GREEDY", 768)
+BUDGET_SAMPLE = _budget("DOT_BUDGET_SIGNAL_SAMPLE", 384)
 
 from ..gateway.base import ModelClient
 from ..types import Caller, GenerationResult, SignalScores
@@ -48,19 +63,42 @@ class SignalCollector:
         self.client = client
         self.k = k
 
-    async def collect(self, prompt: str) -> tuple[SignalScores, GenerationResult]:
-        """返回 (信号, greedy 试答结果)。greedy 结果供路由判本地时复用。"""
-        greedy = await self.client.generate(
-            prompt, max_tokens=256, temperature=0.0, caller=Caller.SIGNAL
-        )
+    async def _sample(self, prompt: str, temperature: float,
+                      max_tokens: int) -> GenerationResult | None:
+        """单次采样；截断/空答/连接失败返回 None，不中断整个请求。
+
+        采样失败本身也是难度信号：拿不到样本时按"不一致"保守处理，
+        由 Router 倾向云端，而不是让异常穿透到 HTTP 层变成 500。
+        """
+        try:
+            return await self.client.generate(
+                prompt, max_tokens=max_tokens, temperature=temperature, caller=Caller.SIGNAL
+            )
+        except RuntimeError:  # GenerationError 与 model_http_*/connection 均为 RuntimeError
+            return None
+
+    async def collect(self, prompt: str) -> tuple[SignalScores, GenerationResult | None]:
+        """返回 (信号, greedy 试答结果)。greedy 结果供路由判本地时复用。
+
+        greedy 为 None 表示本地模型连试答都没完成，调用方必须走升级路径，
+        不能把它当作答案使用。
+        """
+        greedy = await self._sample(prompt, 0.0, BUDGET_GREEDY)
+        if greedy is None:
+            return SignalScores(alpha_quantile=None, consistency=0.0), None
         aq = alpha_quantile(greedy.token_probs) if greedy.token_probs else None
 
         samples = [normalize_answer(greedy.text)]
+        missing = False
         for _ in range(self.k - 1):
-            r = await self.client.generate(
-                prompt, max_tokens=256, temperature=0.7, caller=Caller.SIGNAL
-            )
+            r = await self._sample(prompt, 0.7, BUDGET_SAMPLE)
+            if r is None:
+                missing = True
+                continue
             samples.append(normalize_answer(r.text))
-        consistency = len(set(samples)) == 1 and 1.0 or (1.0 / len(set(samples)))
+        if missing:  # 有采样缺失 → 一致率不可信，按不一致处理
+            consistency = 0.0
+        else:
+            consistency = len(set(samples)) == 1 and 1.0 or (1.0 / len(set(samples)))
 
         return SignalScores(alpha_quantile=aq, consistency=consistency), greedy
