@@ -38,6 +38,9 @@ class Caller(str, Enum):
     VERIFY = "verify"
     RETRY = "retry"
     SUMMARIZE = "summarize"
+    EVIDENCE_SELECT = "evidence_select"
+    EVIDENCE_ANSWER = "evidence_answer"
+    EVIDENCE_FALLBACK = "evidence_fallback"
     WARMUP = "warmup"
 
 
@@ -151,3 +154,8 @@ class RunResult:
     metrics: dict = field(default_factory=dict)
     # 结构化子任务（前端依赖图可视化）：id/description/deps/assigned/level/status/answer
     subtasks: list[dict] = field(default_factory=list)
+
+    success: bool = True
+    error: str | None = None
+    provided_sources: list[str] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
